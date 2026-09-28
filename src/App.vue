@@ -1,304 +1,38 @@
 <template>
-
-  <RandDice :key="randKey" :dice_num="diceCount" class="dices"/>
-
-  <div class="dice-shake">
-
-    <div class="mask" ref="mask" @mousedown="startDrag" @touchstart="startDragTouch"></div>
-
-
-    <div class="buttion-area">
-      <div id="setting-btn" @click="showDialog">
-        <icon name="setting-1" style="color: #f9f9f9;" size="2rem"/>
-      </div>
-      <div id="shake-btn" @click="shakeDice">
-        摇
-      </div>
-    </div>
-  </div>
-
-
-  <t-dialog
-      v-model:visible="visible"
-      header="骰子数量"
-      width="80%"
-
-      :confirm-on-enter="true"
-      :footer="false"
-
-      :on-close="close"
-  >
-    <t-space direction="vertical" style="width: 90%">
-
-      <div>
-        <p>选择骰子个数</p>
-      </div>
-      <div>
-        <p>当前骰子数量：{{ diceCount }}</p>
-      </div>
-      <t-slider v-model="diceCount" :label="true" theme="capsule" :min="1" :max="8" :step="1">
-      </t-slider>
-    </t-space>
-  </t-dialog>
+  <main class="app-shell">
+    <header><span class="eyebrow">LAN LIAR'S DICE</span><h1>酒桌大话骰</h1><p>2～3 人局域网房间 · 服务器保密摇骰</p></header>
+    <section v-if="!room" class="panel lobby">
+      <h2>创建或加入房间</h2><label>昵称<input v-model.trim="name" maxlength="12" placeholder="玩家昵称" /></label>
+      <div class="lobby-grid"><div class="choice"><h3>创建房间</h3><p>选择本局人数，成为房主。</p><div class="buttons"><button @click="create(2)">2 人房</button><button @click="create(3)">3 人房</button></div></div><div class="choice"><h3>加入房间</h3><p>输入房主分享的四位房间码。</p><input v-model.trim="roomCode" maxlength="4" placeholder="例如 A7K2" /><button @click="join">加入</button></div></div>
+      <p v-if="notice" class="notice">{{ notice }}</p>
+    </section>
+    <section v-else class="panel game-panel">
+      <div class="room-bar"><span>房间 <b>{{ room.code }}</b></span><span>{{ room.players.length }}/{{ room.capacity }} 人</span><span v-if="room.phase === 'playing'">{{ currentName }} 的回合</span></div>
+      <div v-if="room.phase === 'lobby'" class="waiting"><h2>等待玩家加入</h2><p>把房间码 <b>{{ room.code }}</b> 分享给同一局域网内的朋友。</p><div class="player-list"><div v-for="player in room.players" :key="player.id" class="player-chip">{{ player.name }} <small v-if="player.id === room.hostId">房主</small></div></div><button v-if="me?.id === room.hostId" :disabled="room.players.length !== room.capacity" @click="send({type:'start'})">开始游戏</button><p v-else>等待房主开始…</p></div>
+      <template v-else>
+        <div class="players"><article v-for="player in room.players" :key="player.id" class="player" :class="{ current: player.id === room.currentPlayerId, me: player.id === me?.id }"><div><b>{{ player.name }}</b><span v-if="player.id === me?.id">我</span><small>负场 {{ player.losses }}</small></div><div v-if="player.dice" class="dice-row"><i v-for="(die,index) in player.dice" :key="index" class="die">{{ die }}</i></div><p v-else class="hidden-dice">骰盅已盖好</p></article></div>
+        <div class="bid-card"><template v-if="room.bid"><span class="eyebrow">当前叫点</span><strong>{{ room.bid.count }} 个 {{ room.bid.point }}{{ room.bid.mode === 'zai' ? ' 斋' : '' }}</strong><p>由 {{ bidderName }} 叫出</p></template><template v-else><span class="eyebrow">本局开始</span><strong>等待首个叫点</strong><p>起叫数量至少为 {{ room.capacity }} 个。</p></template></div>
+        <section v-if="room.phase === 'playing' && myTurn" class="action-box"><h2>你的回合</h2><div class="form-row"><label>数量<input v-model.number="bidCount" type="number" :min="room.capacity" max="15" /></label><label>点数<select v-model.number="bidPoint"><option v-for="point in 6" :key="point" :value="point">{{ point }} 点</option></select></label><label>模式<select v-model="bidMode"><option value="normal">普通</option><option value="zai" :disabled="room.bid?.mode === 'zai'">斋</option><option value="fly" :disabled="room.bid?.mode !== 'zai'">飞</option></select></label></div><div class="buttons"><button @click="bid">叫点</button><button class="danger" :disabled="!room.bid" @click="send({type:'challenge'})">开骰</button></div><p class="rule">普通：1 可代替任意点。斋：1 不算万能。上家叫斋后，飞必须至少把数量翻倍。</p></section>
+        <section v-else-if="room.phase === 'revealed'" class="result"><h2>{{ loserName }} 输了这局</h2><p>叫点为 {{ room.bid.count }} 个 {{ room.bid.point }}{{ room.bid.mode === 'zai' ? '斋' : '' }}；实际可计数为 <b>{{ room.result.actual }}</b> 个。</p><button v-if="me?.id === room.currentPlayerId || me?.id === room.hostId" @click="send({type:'nextRound'})">开始下一局</button><p v-else>等待下一局开始…</p></section>
+        <p v-else class="waiting-turn">等待 {{ currentName }} 叫点或开骰…</p>
+      </template><p v-if="notice" class="notice">{{ notice }}</p>
+    </section>
+  </main>
 </template>
 
 <script setup>
-import {onMounted, ref, watch} from 'vue';
-import RandDice from './components/RandDice.vue';
-import {Icon} from 'tdesign-icons-vue-next';
-
-
-const diceCount = ref(5); // 默认骰子数量
-const visible = ref(false);
-const mask = ref(null);
-let isDragging = false;
-let initialY = 0;
-let maskTop = 0;
-
-const startPos = ref(null);
-const stopPos = ref(null);
-
-const randKey = ref("");
-
-
-const shakeDice = () => {
-  randKey.value = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-
-  // 添加 shake-four-times 动画类
-  mask.value.classList.add('shake-four-times');
-  mask.value.style.top = `${startPos.value}px`;
-
-  // 设置 interval 每隔 1ms 将 isDragging 设置为 false
-  const intervalId = setInterval(() => {
-    isDragging = false;
-  }, 1);
-
-  // 设置 timeout 在 1.5 秒后清除 interval
-  setTimeout(() => {
-    clearInterval(intervalId);
-    mask.value.style.top = `${startPos.value}px`;
-
-  }, 1500);
-
-  // 移除 shake-four-times 动画类
-  mask.value.addEventListener('animationend', () => {
-    mask.value.classList.remove('shake-four-times');
-  }, {once: true});
-
-
-};
-
-
-watch(diceCount, () => {
-  randKey.value = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-});
-
-
-onMounted(() => {
-  startPos.value = window.innerHeight / 7;
-  stopPos.value = -window.innerHeight / 4;
-  console.log(startPos.value);
-  console.log(stopPos.value);
-  randKey.value = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-  mask.value.style.top = `${startPos.value}px`;
-});
-
-const startDrag = (e) => {
-  isDragging = true;
-  initialY = e.clientY;
-  maskTop = mask.value.offsetTop;
-};
-
-const startDragTouch = (e) => {
-  isDragging = true;
-  initialY = e.touches[0].clientY;
-
-  maskTop = mask.value.offsetTop;
-
-};
-
-const drag = (e) => {
-  if (isDragging) {
-    const deltaY = e.clientY - initialY;
-    if (maskTop + deltaY > startPos.value) {
-      mask.value.style.top = `${startPos.value}px`;
-      return;
-    }
-    if (maskTop + deltaY < stopPos.value) {
-      mask.value.style.top = `${stopPos.value}px`;
-      return;
-    }
-    mask.value.style.top = `${maskTop + deltaY}px`;
-  }
-};
-
-const dragTouch = (e) => {
-  if (isDragging) {
-    const deltaY = e.touches[0].clientY - initialY;
-    if (maskTop + deltaY > startPos.value) {
-      mask.value.style.top = `${startPos.value}px`;
-      return;
-    }
-    if (maskTop + deltaY < stopPos.value) {
-      mask.value.style.top = `${stopPos.value}px`;
-      return;
-    }
-    mask.value.style.top = `${maskTop + deltaY}px`;
-  }
-};
-
-const stopDrag = () => {
-  isDragging = false;
-};
-
-const showDialog = () => {
-  visible.value = true;
-};
-
-window.addEventListener('mousemove', drag);
-window.addEventListener('mouseup', stopDrag);
-window.addEventListener('touchmove', dragTouch);
-window.addEventListener('touchend', stopDrag);
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+const name = ref(localStorage.getItem('dice-name') || ''), roomCode = ref(''), room = ref(null), me = ref(null), notice = ref('');
+const bidCount = ref(3), bidPoint = ref(6), bidMode = ref('normal'); let socket;
+const currentName = computed(() => room.value?.players.find(p => p.id === room.value.currentPlayerId)?.name || '玩家');
+const bidderName = computed(() => room.value?.players.find(p => p.id === room.value.bid?.playerId)?.name || '上一家');
+const loserName = computed(() => room.value?.players.find(p => p.id === room.value.result?.loserId)?.name || '玩家');
+const myTurn = computed(() => room.value?.currentPlayerId === me.value?.id);
+function connect() { if (socket?.readyState === WebSocket.OPEN) return; socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/dice`); socket.onmessage = ({ data }) => { const msg = JSON.parse(data); if (msg.type === 'error') return notice.value = msg.text; if (msg.type === 'state') { room.value = msg.room; me.value = room.value.players.find(p => p.id === room.value.youId) || null; notice.value = ''; if (room.value.bid) { bidCount.value = room.value.bid.count; bidPoint.value = room.value.bid.point; bidMode.value = room.value.bid.mode === 'zai' ? 'fly' : 'normal'; } } }; socket.onclose = () => { if (room.value) notice.value = '与游戏服务器断开连接。'; }; }
+function send(payload) { if (socket?.readyState !== WebSocket.OPEN) return notice.value = '正在连接服务器，请稍后重试。'; socket.send(JSON.stringify(payload)); }
+function playerName() { const value = name.value || '玩家'; localStorage.setItem('dice-name', value); return value; }
+function create(capacity) { connect(); const go = () => send({ type: 'create', name: playerName(), capacity }); socket.readyState === WebSocket.OPEN ? go() : socket.addEventListener('open', go, { once: true }); }
+function join() { if (!roomCode.value) return notice.value = '请输入房间码。'; connect(); const go = () => send({ type: 'join', name: playerName(), code: roomCode.value }); socket.readyState === WebSocket.OPEN ? go() : socket.addEventListener('open', go, { once: true }); }
+function bid() { send({ type: 'bid', count: bidCount.value, point: bidPoint.value, mode: bidMode.value }); }
+onMounted(connect); onBeforeUnmount(() => socket?.close());
 </script>
-
-<style scoped>
-* {
-  user-select: none;
-  outline: none;
-}
-
-
-.dice-shake {
-  height: 100vh;
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.buttion-area {
-  width: 100%;
-  height: 20vh;
-  display: flex;
-  flex-direction: row;
-  justify-content: space-evenly;
-  align-items: center;
-}
-
-#shake-btn {
-  width: 65px;
-  height: 65px;
-  font-size: 2rem;
-  border-radius: 50%;
-  border: solid 1px rgba(255, 255, 255, 0.5);
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  color: #fff;
-  background-color: rgb(255, 100, 105);
-  filter: drop-shadow(0 0 1.2rem rgba(255, 100, 105, 0.67));
-  outline: none;
-}
-
-#setting-btn {
-  width: 65px;
-  height: 65px;
-  border-radius: 50%;
-  border: solid 1px rgba(255, 255, 255, 0.5);
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  filter: drop-shadow(0 0 3rem rgb(255, 255, 255));
-  outline: none;
-
-
-}
-
-.mask {
-  position: relative;
-  min-width: 375px;
-  max-width: 500px;
-  min-height: 375px;
-  max-height: 60vh;
-  background-image: url("../public/assets/cup.png");
-  background-size: contain;
-  background-repeat: no-repeat;
-  opacity: 1;
-  cursor: grab;
-  filter: drop-shadow(0 0 2rem rgba(105, 100, 255, 0.67));
-}
-
-.mask.shake-four-times {
-  animation: shake-four-times 0.5s ease-in-out 3;
-}
-
-
-.mask:active {
-  cursor: grabbing;
-}
-
-.dices {
-  position: fixed;
-  top: 35vh;
-  left: 0;
-  z-index: -1;
-}
-
-@keyframes shake-four-times {
-  0%, 100% {
-    transform: rotate(0deg);
-  }
-  25% {
-    transform: rotate(-5deg);
-  }
-  50% {
-    transform: rotate(10deg);
-  }
-  75% {
-    transform: rotate(-5deg);
-  }
-}
-
-
-@media (max-width: 768px) {
-  .buttion-area {
-    animation: slideUp 0.4s ease-out;
-  }
-
-  .dice-shake {
-    animation: slideUp 0.4s ease-out;
-  }
-
-  @keyframes slideUp {
-    from {
-      opacity: 0;
-      transform: translateY(-20px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
-  }
-}
-
-@media (max-width: 1280px) {
-  .mask {
-    min-width: 500px;
-    max-width: 500px;
-    min-height: 500px;
-    max-height: 500px;
-  }
-
-}
-
-@media (max-width: 768px) {
-  .mask {
-    min-width: 375px;
-    max-width: 375px;
-    min-height: 80vh;
-    max-height: 100vh;
-  }
-
-}
-</style>
